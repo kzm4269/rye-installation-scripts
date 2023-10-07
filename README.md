@@ -1,1 +1,1 @@
-# rye-installation-scripts
+# Rye installation scripts
