@@ -1,4 +1,4 @@
-# Rye installer scripts for Windows 10
+# Rye installation scripts for Windows 10
 
 ## Usage
 
