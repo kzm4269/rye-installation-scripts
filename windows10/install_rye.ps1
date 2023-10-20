@@ -220,7 +220,6 @@ function InstallRye {
     if (-not $ForceInstall) {
         foreach ($RyeExe in (FindRye)) {
             Log Info "Already installed: $RyeExe"
-            & $RyeExe self update
             return
         }
     }
