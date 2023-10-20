@@ -1,173 +1,289 @@
-$script = {
-    param(
-        [string]$rye_home,
-        [string]$env_target,
-        [string]$rye_version
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+$PSDefaultParameterValues['*:ErrorAction'] = 'Stop'
+
+
+# Utils: Logging
+# ---------------------------------------------------------------------------------------------------------------------
+
+enum LogLevel {
+    Verbose = 0
+    Debug = 10
+    Info = 20
+    Warning = 30
+    Error = 40
+}
+$script:LogLevel = [LogLevel]::Debug
+
+function Get-LogLevel {
+    return $script:LogLevel
+}
+
+function Set-LogLevel {
+    [CmdletBinding(PositionalBinding = $false)]
+    Param(
+        [Parameter(Mandatory = $true, Position = 0)]
+        [LogLevel]
+        $Level
     )
-    $global:PSBoundParameters = $PSBoundParameters
+    $script:LogLevel = $Level
+}
 
-    function Main() {
-        $params = $global:PSBoundParameters
-        if ($env_target.ToLower() -Eq "machine") {
-            RequireAdmin
+function Log {
+    [CmdletBinding(PositionalBinding = $false)]
+    Param(
+        [Parameter(Mandatory = $true, Position = 0)]
+        [LogLevel]
+        $Level,
+        
+        [Parameter(Mandatory = $true, Position = 1)]
+        [AllowEmptyString()]
+        [string]
+        $Message,
+        
+        [Parameter()]
+        [System.Management.Automation.CallStackFrame]
+        $CallStackFrame = $null
+    )
+
+    if ($Level -lt $script:LogLevel) {
+        return
+    }
+    if ($null -eq $CallStackFrame) {
+        $CallStackFrame = $(Get-PSCallStack)[1]
+    }
+
+    $LevelColor = switch ($Level) {
+        Verbose { "Black" }
+        Debug { "Blue" }
+        Info { "White" }
+        Warning { "Yellow" }
+        Error { "Red" }
+    }
+    $Date = $(Get-Date -Format "yyyy-mm-dd hh:mm:ss.fff")
+    $ScriptName = if ($null -eq $CallStackFrame.ScriptName) {
+        "<No ScriptName>"
+    }
+    else {
+        $(Split-Path -Leaf $CallStackFrame.ScriptName)
+    }
+
+    Write-Host -NoNewline $Date -ForegroundColor "Green"
+    Write-Host -NoNewline " | "
+    Write-Host -NoNewline ("{0,-8}" -f $Level.ToString().ToUpper()) -ForegroundColor $LevelColor
+    Write-Host -NoNewline " | "
+    Write-Host -NoNewline $ScriptName -ForegroundColor "Cyan"
+    Write-Host -NoNewline ":"
+    Write-Host -NoNewline $CallStackFrame.Location -ForegroundColor "Cyan"
+    Write-Host -NoNewline " - "
+    Write-Host -NoNewline $CallStackFrame.FunctionName -ForegroundColor "Cyan"
+    Write-Host -NoNewline " - "
+    Write-Host $Message -ForegroundColor $LevelColor
+}
+
+function LogException {
+    [CmdletBinding(PositionalBinding = $false)]
+    Param(
+        [Parameter(Mandatory = $true, Position = 0)]
+        [AllowEmptyString()]
+        [string]
+        $Message,
+        
+        [Parameter()]
+        [LogLevel]
+        $Level = [LogLevel]::Error,
+        
+        [Parameter()]
+        [System.Management.Automation.CallStackFrame]
+        $CallStackFrame = $null,
+
+        [Parameter()]
+        [System.Management.Automation.ErrorRecord]
+        $ErrorRecord
+    )
+
+    if ($null -eq $CallStackFrame) {
+        $CallStackFrame = $(Get-PSCallStack)[1]
+    }
+    if ($null -eq $ErrorRecord) {
+        if (-not $global:Error) {
+            Log $Level $Message -CallStackFrame $CallStackFrame
+            return
         }
-        UninstallRye
-        InstallRye $params["rye_version"] $params["rye_home"] $params["env_target"]
-        LogMessage "Executing: rye self update"
-        & rye self update
-        LogMessage "Completed successfully"
-    }
 
-    function GetFunctionName([int]$stack_number = 1) {
-        return [string]$(Get-PSCallStack)[$stack_number].FunctionName
+        $ErrorRecord = $global:Error[0]
     }
+    $ExceptionName = $ErrorRecord.Exception.GetType().FullName
 
-    function LogMessage([string]$message) {
-        $function_name = GetFunctionName 2
-        Write-Host "$(Get-Date -Format G): ${function_name}: ${message}" -ForegroundColor "Magenta"
+    $StackTraces = @(
+        "$($ExceptionName): $ErrorRecord"
+        $ErrorRecord.ScriptStackTrace
+    )
+
+    Log $Level "$Message`n$($StackTraces -join "`n")" -CallStackFrame $CallStackFrame
+}
+
+
+# Utils: Environment variables
+# ---------------------------------------------------------------------------------------------------------------------
+
+function UpdateEnvironmentVairbale() {
+    [CmdletBinding(PositionalBinding = $false)]
+    Param(
+        [Parameter(Mandatory = $true, Position = 0)]
+        [string]
+        $Name,
+
+        [Parameter(Mandatory = $true, Position = 1)]
+        [AllowEmptyString()]
+        [string]
+        $Value,
+
+        [Parameter(Mandatory = $true, Position = 2)]
+        [System.EnvironmentVariableTarget]
+        $Target
+    )
+
+    $Old = [System.Environment]::GetEnvironmentVariable($Name, $Target)
+    if ("$Old" -Ne "$Value") {
+        Log Info "Update: $Name ($Target)"
+        Log Debug "    Old: $Old"
+        Log Debug "    New: $Value"
+        [System.Environment]::SetEnvironmentVariable($Name, $Value, $Target)
     }
+}
 
-    function RequireAdmin() {
-        $current_role = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
-        if (!$current_role.IsInRole("Administrators")) {
-            LogMessage "Restart this script as admin..."
-            try {
-                [System.Collections.ArrayList]$argument_list = "-File", "$PSCommandPath"
-                $argument_list += $global:PSBoundParameters.Values
-                Start-Process powershell.exe -ArgumentList $argument_list -Verb RunAs -Wait
-            }
-            catch [InvalidOperationException] {
-                LogMessage "Canceled"
-            }
-            exit
+function RemovePathItem {
+    [CmdletBinding(PositionalBinding = $false)]
+    Param(
+        [Parameter(Mandatory = $true, Position = 0)]
+        [string]
+        $Path,
+        
+        [Parameter(Mandatory = $true, Position = 1)]
+        [string]
+        $Target
+    )
+
+    $Target = $Target.TrimEnd("/").ToLower()
+    return ($Path -split ";" | Where-Object { $_.TrimEnd("/").ToLower() -ne $Target }) -join ";"
+}
+
+
+# Utils: etc
+# ---------------------------------------------------------------------------------------------------------------------
+
+function IsAdmin {
+    Param()
+    $CurrentPrincipal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+    return $CurrentPrincipal.IsInRole("Administrators")
+}
+
+
+# Rye
+# ---------------------------------------------------------------------------------------------------------------------
+
+function FindRye {
+    foreach ($PathItem in ($Env:Path -split ";")) {
+        $RyeExe = "$PathItem\rye.exe"
+        if (Test-Path $RyeExe) {
+            $RyeExe
+        }
+    }
+}
+
+
+function InstallRye {
+    [CmdletBinding(PositionalBinding = $false)]
+    Param(
+        [Parameter(Mandatory = $true)]
+        [string]
+        $RyeHome,
+
+        [Parameter(Mandatory = $true)]
+        [System.EnvironmentVariableTarget]
+        $EnvTarget,
+
+        [Parameter(Mandatory = $true)]
+        [bool]
+        $ForceInstall,
+
+        [Parameter()]
+        [string]
+        $InstallerVersion = "0.15.2"
+    )
+    Log Debug "InstallerVersion = $InstallerVersion"
+    Log Debug "RyeHome = $RyeHome"
+    Log Debug "EnvTarget = $EnvTarget"
+    Log Debug "ForceInstall = $ForceInstall"
+
+    if (-not $ForceInstall) {
+        foreach ($RyeExe in (FindRye)) {
+            Log Info "Already installed: $RyeExe"
+            & $RyeExe self update
+            return
         }
     }
 
-    function RemovePathItem([string]$path, [string]$target) {
-        [System.Collections.ArrayList]$items = $path -Split ";"
-        [System.Collections.ArrayList]$targets = @()
-        foreach ($item in $path -Split ";") {
-            if ($item.TrimEnd('\').ToLower() -Eq $target.TrimEnd('\').ToLower()) {
-                $targets += $item
-            }
+    $InstallerUrl = "https://github.com/mitsuhiko/rye/releases/download/$InstallerVersion/rye-x86_64-windows.exe"
+    $InstallerExe = ".\rye-x86_64-windows.exe"
+    $Installed = $false
+    try {
+        UpdateEnvironmentVairbale "RYE_HOME" $RyeHome Process
+
+        Log Info "Downloading Rye installer"
+        Invoke-WebRequest -UseBasicParsing -o $InstallerExe $InstallerUrl
+        Log Info "Executing: rye self install"
+        & $InstallerExe self install --yes
+        Log Info "Executing: rye self update"
+        & $InstallerExe self update
+
+        foreach ($EnvTarget_ in @("Process", $EnvTarget)) {
+            $Path = RemovePathItem ([System.Environment]::GetEnvironmentVariable("PATH", $EnvTarget_)) "$RyeHome\shims"
+            UpdateEnvironmentVairbale "PATH" "$RyeHome\shims;$Path" $EnvTarget_
+            UpdateEnvironmentVairbale "RYE_HOME" $RyeHome $EnvTarget_
         }
-        foreach ($item in $targets) {
-            $items.Remove($item)
-        }
-        return $items -Join ";"
+
+        $Installed = $true
     }
+    finally {
+        if (-not $Installed) {
+            Log Error "Installation failed"
 
-    function UpdateEnvironmentVairbale([string]$name, [string]$value, [string]$target) {
-        $old = [Environment]::GetEnvironmentVariable($name, $target)
-        if ($old -Ne $value) {
-            if ($target.ToLower() -Eq "machine") {
-                RequireAdmin
-            }
-            [Environment]::SetEnvironmentVariable($name, $value, $target)
-        }
-    }
-
-    function UninstallRye() {
-        LogMessage "Start Rye uninstalltion"
-        try {
-            foreach ($env_target in "user", "machine") {
-                # Find rye.exe by RYE_HOME
-                $ENV:RYE_HOME = [Environment]::GetEnvironmentVariable("RYE_HOME", $env_target)
-                if ($null -Ne $ENV:RYE_HOME) {        
-                    LogMessage "Found RYE_HOME: $ENV:RYE_HOME"
-                    $rye_exe_path = "$ENV:RYE_HOME\shims\rye.exe"
-
-                    if (Test-Path $rye_exe_path) {
-                        LogMessage "Found rye.exe: $rye_exe_path"
-                        LogMessage "Executing: rye self uninstall"
-                        & $rye_exe_path self uninstall -y
-                    }
-
-                    LogMessage "Updating environment variable: PATH"
-                    $path = [Environment]::GetEnvironmentVariable("PATH", $env_target)
-                    $path_new = RemovePathItem $path "$ENV:RYE_HOME\shims"
-                    UpdateEnvironmentVairbale "PATH" $path_new $env_target
-
-                    LogMessage "Removing environment variable: RYE_HOME"
-                    UpdateEnvironmentVairbale "RYE_HOME" $null $env_target
+            if (Test-Path $InstallerExe) {
+                Log Info "Executing: rye self uninstall"
+                & $InstallerExe self uninstall --yes
+                if ((Test-Path $RyeHome) -and -not (Test-Path "$RyeHome\*")) {
+                    Remove-Item $RyeHome
                 }
-
-                # Find rye.exe by PATH
-                $ENV:PATH = [Environment]::GetEnvironmentVariable("PATH", $env_target)
-                $rye_exe_path = (Get-Command rye.exe 2>$null).Definition
-                if ($null -Ne $rye_exe_path) {
-                    LogMessage "Found rye.exe: $rye_exe_path"
-                    $rye_shims_path = Split-Path -Parent $rye_exe_path
-                    $rye_home = Split-Path -Parent $rye_shims_path
-
-                    LogMessage "Updating environment variable: PATH"
-                    $path = [Environment]::GetEnvironmentVariable("PATH", $env_target)
-                    $path_new = RemovePathItem $path $rye_shims_path
-                    UpdateEnvironmentVairbale "PATH" $path_new $env_target
-
-                    if (Test-Path $rye_exe_path) {
-                        LogMessage "Executing: rye self uninstall"
-                        & $rye_exe_path self uninstall -y
-                    }
-                }
             }
         }
-        finally {
-            LogMessage "Rye uninstalltion completed"
+
+        Log Info "Deleting Rye installer"
+        if (Test-Path $InstallerExe) {
+            Remove-Item $InstallerExe
         }
     }
-
-    function InstallRye([string]$rye_version, [string]$rye_home, [string]$env_target) {
-        LogMessage "Start Rye installtion (version: $rye_version, RYE_HOME: $rye_home, target: $env_target)"
-
-        try {
-            LogMessage "Updating environment variable: RYE_HOME"
-            ${ENV:RYE_HOME} = $rye_home
-            UpdateEnvironmentVairbale "RYE_HOME" $ENV:RYE_HOME $env_target
-
-            LogMessage "Updating environment variable: PATH"
-            $path = "$ENV:RYE_HOME\shims;" + [Environment]::GetEnvironmentVariable("PATH", $env_target)
-            UpdateEnvironmentVairbale "PATH" $path $env_target
-
-            ${ENV:PATH} = "$ENV:RYE_HOME\shims;" + [Environment]::GetEnvironmentVariable("PATH")
-
-            LogMessage "Downloading Rye installer"
-            $installer_url = "https://github.com/mitsuhiko/rye/releases/download/$rye_version/rye-x86_64-windows.exe"
-            $installer_exe = ".\rye-x86_64-windows.exe"
-            try {
-                Invoke-WebRequest -UseBasicParsing -o $installer_exe $installer_url
-
-                LogMessage "Executing Rye installer"
-                & $installer_exe self install --yes
-            }
-            finally {
-                if (Test-Path $installer_exe) {
-                    Remove-Item $installer_exe
-                }
-            }
-        }
-        finally {
-            LogMessage "Rye installtion completed"
-        }
-    }
-
-    Main
 }
 
-if ($null -Eq $rye_home) {
-    $rye_home = "$ENV:USERPROFILE\.rye"
+function InstallRyeForUser {
+    [CmdletBinding(PositionalBinding = $false)]
+    Param(
+        [Parameter()]
+        [bool]
+        $ForceInstall = $false
+    )
+
+    InstallRye -RyeHome "$Env:UserProfile\.rye" -EnvTarget User -ForceInstall $ForceInstall
 }
-if ($null -Eq $env_target) {
-    $env_target = "user"
-}
-if ($null -Eq $rye_version) {
-    $rye_version = "0.15.2"
-}
-$script_path = ".\tmp.ps1"
-Write-Output "$script" > $script_path
-try {
-    & $script_path $rye_home $env_target $rye_version
-}
-finally {
-    Remove-Item $script_path
+
+function InstallRyeForMachine {
+    [CmdletBinding(PositionalBinding = $false)]
+    Param(
+        [Parameter()]
+        [bool]
+        $ForceInstall = $false
+    )
+
+    InstallRye -RyeHome "C:\.rye" -EnvTarget Machine -ForceInstall $ForceInstall
 }

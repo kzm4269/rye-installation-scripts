@@ -5,11 +5,11 @@
 Execute this code in powershell.
 
 ```powershell
-$rye_home="$ENV:USERPROFILE\.rye"; $env_target="user"; (Invoke-Webrequest "https://raw.githubusercontent.com/kzm4269/rye-installation-scripts/main/windows10/install_rye.ps1").Content | Invoke-Expression
+Invoke-Webrequest "https://raw.githubusercontent.com/kzm4269/rye-installation-scripts/main/windows10/install_rye.ps1" -O lib.ps1; Start-Process powershell ". '.\lib.ps1'; InstallRyeForUser; Pause" -Wait
 ```
 
 To install Rye for all users, use the following code instead of the above code.
 
 ```powershell
-$rye_home="C:\.rye"; $env_target="machine"; (Invoke-Webrequest "https://raw.githubusercontent.com/kzm4269/rye-installation-scripts/main/windows10/install_rye.ps1").Content | Invoke-Expression
+Invoke-Webrequest "https://raw.githubusercontent.com/kzm4269/rye-installation-scripts/main/windows10/install_rye.ps1" -O lib.ps1; Start-Process powershell ". '.\lib.ps1'; InstallRyeForMachine; Pause" -Wait -Verb RunAs
 ```
