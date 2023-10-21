@@ -174,20 +174,49 @@ function RemovePathItem {
 # ---------------------------------------------------------------------------------------------------------------------
 
 function IsAdmin {
+    [CmdletBinding(PositionalBinding = $false)]
     Param()
+
     $CurrentPrincipal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
     return $CurrentPrincipal.IsInRole("Administrators")
 }
 
+function ActivateDevelopperMode {
+    [CmdletBinding(PositionalBinding = $false)]
+    Param()
+
+    $Key = "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock"
+    $Property = "AllowDevelopmentWithoutDevLicense"
+    try {
+        $Value = (Get-ItemProperty -Path Registry::$Key).$Property
+    } catch [ItemNotFoundException] {
+        $Value = $null
+    }
+    if (0 -eq [int]$Value) {
+        Log Info "Update Registory::$Key, $Property"
+        $Command = "reg add $Key /t REG_DWORD /f /v $Property /d 1"
+        if (IsAdmin) {
+            powershell $Command
+        } else {
+            Start-Process powershell $Command -Wait -Verb RunAs
+        }
+    }
+}
 
 # Rye
 # ---------------------------------------------------------------------------------------------------------------------
 
-function FindRye {
-    foreach ($PathItem in ($Env:Path -split ";")) {
-        $RyeExe = "$PathItem\rye.exe"
-        if (Test-Path $RyeExe) {
-            $RyeExe
+function FindRye {    
+    [CmdletBinding(PositionalBinding = $false)]
+    Param()
+
+    foreach ($EnvTarget in @("Process", "User", "Machine")) {
+        $Path = [System.Environment]::GetEnvironmentVariable("Path", $EnvTarget)
+        foreach ($PathItem in ($Path -split ";")) {
+            $RyeExe = "$PathItem\rye.exe"
+            if (Test-Path $RyeExe) {
+                $RyeExe
+            }
         }
     }
 }
@@ -217,6 +246,7 @@ function InstallRye {
     Log Debug "EnvTarget = $EnvTarget"
     Log Debug "ForceInstall = $ForceInstall"
 
+    ActivateDevelopperMode
     if (-not $ForceInstall) {
         foreach ($RyeExe in (FindRye)) {
             Log Info "Already installed: $RyeExe"
